@@ -1,0 +1,80 @@
+name: Build Android APK (app-debug.apk)
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build & Release app-debug.apk
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Java JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Dependencies & Build Web Bundle
+        run: |
+          npm install
+          npm run build
+
+      - name: Initialize Capacitor Android Project
+        run: |
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 --no-save
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          node scripts/configure-android-permissions.mjs
+          npx cap sync android
+
+      - name: Build Debug APK (app-debug.apk)
+        working-directory: ./android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Copy APK to Workspace Root
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk ./app-debug.apk
+          ls -lh ./app-debug.apk
+
+      - name: Upload app-debug.apk Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug.apk
+          path: ./app-debug.apk
+          if-no-files-found: error
+
+      - name: Publish GitHub Release with app-debug.apk
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: "KanthoClone Studio APK v1.0.${{ github.run_number }}"
+          body: |
+            ### KanthoClone AI Voice Studio — Android APK Release
+            - **File**: `app-debug.apk`
+            - **Features**: 10-Band Vocal DNA Voice Cloning, Background Music & Noise Isolation, 16+ Studio Voices, Dual Podcast & Dubbing.
+          files: |
+            ./app-debug.apk
+          draft: false
+          prerelease: false

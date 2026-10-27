@@ -1,0 +1,6 @@
+{
+  "name": "KanthoClone AI Voice Studio",
+  "description": "AI-powered voice cloning, acoustic profiling, and multilingual Bengali & English speech synthesis studio.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
