@@ -2,7 +2,6 @@
   "appId": "com.kanthoclone.studio",
   "appName": "KanthoClone Studio",
   "webDir": "dist",
-  "bundledWebRuntime": false,
   "server": {
     "url": "https://ais-pre-5q2uouyrrnjw7rm3s23uhz-172540980359.asia-east1.run.app",
     "cleartext": true,
@@ -12,8 +11,6 @@
     ]
   },
   "android": {
-    "allowMixedContent": true,
-    "captureInput": true,
-    "webContentsDebuggingEnabled": true
+    "allowMixedContent": true
   }
 }
