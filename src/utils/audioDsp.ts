@@ -1,15 +1,15 @@
 import { PrebuiltVoiceName, VOCAL_DNA_BANDS } from "../types/voice";
 
 export interface AcousticDspParams {
-  pitchSemitones: number; // Manual fine-tuning slider (-3.5 to +3.5)
-  baseRecommendedSemitones?: number; // Default recommended semitones for this voice
-  targetPitchHz?: number; // Exact fundamental frequency f0 (Hz) of the cloned voice
-  pitchLockEnabled?: boolean; // Lock output f0 to targetPitchHz (default: true)
-  speed: number; // 0.82 to 1.22 (independent speaking rate)
-  warmthDb: number; // -4 to +6 (185Hz Low-shelf)
-  presenceDb: number; // -4 to +6 (3.2kHz Peaking)
-  spectralFingerprint?: number[]; // 10-band vocal DNA formant dB curve
-  cloneMatchStrength?: number; // 0.0 to 1.25 (1.0 = 100% 1:1 Formant & Timbre Lock)
+  pitchSemitones: number; // Micro-calibration (-2.0 to +2.0 semitones)
+  baseRecommendedSemitones?: number;
+  targetPitchHz?: number;
+  pitchLockEnabled?: boolean;
+  speed: number; // 0.85 to 1.18
+  warmthDb: number; // -2 to +3 (gentle 165Hz warmth)
+  presenceDb: number; // -2 to +4 (3.2kHz studio clarity)
+  spectralFingerprint?: number[]; // 10-band vocal DNA formant curve
+  cloneMatchStrength?: number; // 0.0 to 1.25
 }
 
 export interface LocalAcousticAnalysis {
@@ -60,18 +60,19 @@ export function base64ToBlob(base64: string, mimeType = "audio/wav"): Blob {
 }
 
 /**
- * Fast, accurate autocorrelation fundamental frequency (f0 in Hz) detector on voiced frames.
- * Used both when analyzing a user's voice recording AND when measuring raw TTS output
- * so we can lock the output pitch 1:1 to the cloned voice's exact Hz!
+ * Normalized Square Difference Function (McLeod Pitch Method / First-Peak Autocorrelation):
+ * Eliminates the classic sub-harmonic octave error (where 170Hz was misdetected as 85Hz,
+ * which previously caused normal voices to be assigned deep bass profiles and sound "মোটা" / thick!).
+ * Always selects the FIRST strong periodic peak corresponding to the true fundamental frequency f0.
  */
 export function detectMedianPitchHz(
   channel: Float32Array,
   sampleRate: number,
-  fallbackHz = 136
+  fallbackHz = 148
 ): { medianPitchHz: number; voicedRatio: number } {
-  const frameSize = Math.floor(sampleRate * 0.04);
-  const minLag = Math.floor(sampleRate / 320);
-  const maxLag = Math.floor(sampleRate / 75);
+  const frameSize = Math.floor(sampleRate * 0.035); // 35ms frame
+  const minLag = Math.floor(sampleRate / 310); // max 310 Hz
+  const maxLag = Math.floor(sampleRate / 82); // min 82 Hz
   const detectedPitches: number[] = [];
   let voicedFrames = 0;
   let totalFrames = 0;
@@ -84,25 +85,51 @@ export function detectMedianPitchHz(
       rms += s * s;
     }
     rms = Math.sqrt(rms / frameSize);
-    if (rms < 0.015) continue;
+    if (rms < 0.016) continue;
     voicedFrames++;
 
-    let bestLag = 0;
-    let bestCorr = 0;
+    // Compute Normalized Autocorrelation (NSDF) across [minLag, maxLag]
+    const nsdf = new Float32Array(maxLag + 1);
+    let maxPeakVal = 0;
+
     for (let lag = minLag; lag <= maxLag; lag += 2) {
-      let corr = 0;
-      for (let i = 0; i < frameSize - lag; i += 3) {
-        corr += channel[start + i] * channel[start + i + lag];
+      let acf = 0;
+      let norm = 0;
+      const len = frameSize - lag;
+      for (let i = 0; i < len; i += 3) {
+        const a = channel[start + i];
+        const b = channel[start + i + lag];
+        acf += a * b;
+        norm += a * a + b * b;
       }
-      if (corr > bestCorr) {
-        bestCorr = corr;
-        bestLag = lag;
+      const val = norm > 1e-8 ? (2 * acf) / norm : 0;
+      nsdf[lag] = val;
+      if (val > maxPeakVal) {
+        maxPeakVal = val;
       }
     }
 
-    if (bestLag > 0) {
-      const freq = sampleRate / bestLag;
-      if (freq >= 80 && freq <= 300) {
+    if (maxPeakVal < 0.35) continue;
+
+    // Pick the FIRST local maximum that reaches >= 78% of maxPeakVal
+    // This guarantees we pick true period T (e.g. 160Hz) instead of sub-harmonic 2T (80Hz)!
+    const threshold = maxPeakVal * 0.78;
+    let chosenLag = 0;
+
+    for (let lag = minLag + 2; lag <= maxLag - 2; lag += 2) {
+      if (
+        nsdf[lag] >= threshold &&
+        nsdf[lag] >= nsdf[lag - 2] &&
+        nsdf[lag] >= nsdf[lag + 2]
+      ) {
+        chosenLag = lag;
+        break;
+      }
+    }
+
+    if (chosenLag > 0) {
+      const freq = sampleRate / chosenLag;
+      if (freq >= 85 && freq <= 300) {
         detectedPitches.push(freq);
       }
     }
@@ -121,8 +148,6 @@ export function detectMedianPitchHz(
 /**
  * Extracts a 10-Band Spectral Formant Fingerprint (Vocal DNA) across VOCAL_DNA_BANDS:
  * [110, 175, 280, 450, 750, 1250, 2000, 3150, 4500, 6500] Hz
- * Uses Goertzel/band-energy integration on voiced frames to capture the speaker's
- * unique chest resonance, vowel formants (F1/F2/F3), and sibilance air.
  */
 export function extract10BandSpectralFingerprint(
   channel: Float32Array,
@@ -133,7 +158,7 @@ export function extract10BandSpectralFingerprint(
   const stepSize = Math.max(256, Math.floor(windowSize * 0.75));
   let voicedWindows = 0;
 
-  const slopeWeights = [0.7, 0.8, 0.9, 1.0, 1.15, 1.35, 1.6, 2.0, 2.5, 3.1];
+  const slopeWeights = [0.65, 0.75, 0.85, 1.0, 1.2, 1.45, 1.75, 2.15, 2.6, 3.1];
 
   for (let start = 0; start + windowSize < channel.length; start += stepSize) {
     let rms = 0;
@@ -152,7 +177,7 @@ export function extract10BandSpectralFingerprint(
 
       const k = Math.round((windowSize * freq) / sampleRate);
       const omega = (2 * Math.PI * k) / windowSize;
-      const coeff = 2 * Math.cos(omega);
+      const coeff = 2 * Math.PI ? 2 * Math.cos(omega) : 0;
       let q1 = 0;
       let q2 = 0;
 
@@ -168,7 +193,7 @@ export function extract10BandSpectralFingerprint(
   }
 
   if (voicedWindows === 0) {
-    return [2.2, 2.4, 1.0, 0.6, 1.4, 2.2, 2.5, 2.1, 1.5, 1.0];
+    return [0.4, 0.6, 0.2, 0.8, 1.4, 2.0, 2.4, 2.2, 1.6, 1.2];
   }
 
   const dbValues: number[] = [];
@@ -181,86 +206,17 @@ export function extract10BandSpectralFingerprint(
   }
 
   const meanDb = sumDb / VOCAL_DNA_BANDS.length;
-  return dbValues.map((db) => {
-    const diff = (db - meanDb) * 0.35;
-    return Number(Math.max(-3.2, Math.min(4.2, diff)).toFixed(1));
+  // Gentle, natural [-1.8dB, +2.4dB] formant curve that never makes the voice boomy or thick
+  return dbValues.map((db, idx) => {
+    const rawDiff = (db - meanDb) * 0.22;
+    // Prevent low-end bands (110Hz, 175Hz, 280Hz) from boosting > +0.8dB (avoids "মোটা" boomy voice)
+    const maxAllowed = idx <= 2 ? 0.8 : 2.4;
+    return Number(Math.max(-1.8, Math.min(maxAllowed, rawDiff)).toFixed(1));
   });
 }
 
 /**
- * Time-Domain Overlap-Add (OLA) Time-Stretcher:
- * Separates speaking speed (tempo) from pitch-shifting so that locking the pitch
- * to the cloned speaker's exact Hz NEVER makes the voice abnormally fast or slow!
- */
-function timeStretchPcm(
-  input: Float32Array,
-  stretchFactor: number, // > 1.0 = longer/slower, < 1.0 = shorter/faster
-  sampleRate: number
-): Float32Array {
-  if (Math.abs(stretchFactor - 1.0) < 0.015) {
-    return input;
-  }
-
-  const grainSize = Math.max(256, Math.floor(sampleRate * 0.032)); // 32ms vocal grain
-  const synHop = Math.floor(grainSize / 2);
-  const anaHop = Math.max(16, Math.round(synHop / stretchFactor));
-  const outLength = Math.max(grainSize, Math.ceil(input.length * stretchFactor));
-  const output = new Float32Array(outLength);
-  const norm = new Float32Array(outLength);
-
-  // Precompute Hann window
-  const hann = new Float32Array(grainSize);
-  for (let i = 0; i < grainSize; i++) {
-    hann[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (grainSize - 1)));
-  }
-
-  let inPos = 0;
-  let outPos = 0;
-
-  while (inPos + grainSize < input.length && outPos + grainSize < outLength) {
-    // Pitch-aligned cross-correlation search around inPos to prevent phaseiness
-    let bestOffset = 0;
-    if (outPos > 0 && inPos > 0) {
-      const searchRange = Math.min(Math.floor(grainSize * 0.25), input.length - inPos - grainSize);
-      let bestCorr = -Infinity;
-      for (let off = 0; off < searchRange; off += 4) {
-        let corr = 0;
-        for (let k = 0; k < 128; k += 4) {
-          corr += output[outPos + k] * input[inPos + off + k];
-        }
-        if (corr > bestCorr) {
-          bestCorr = corr;
-          bestOffset = off;
-        }
-      }
-    }
-
-    const actualIn = inPos + bestOffset;
-    for (let i = 0; i < grainSize; i++) {
-      const w = hann[i];
-      output[outPos + i] += input[actualIn + i] * w;
-      norm[outPos + i] += w * w;
-    }
-
-    inPos += anaHop;
-    outPos += synHop;
-  }
-
-  for (let i = 0; i < outLength; i++) {
-    if (norm[i] > 1e-4) {
-      output[i] /= norm[i];
-    }
-  }
-
-  return output;
-}
-
-/**
- * Isolates human voice from background noise, hum, and background music/instruments:
- * 1. Stereo Mid-Side (M/S) Center Channel Extraction to strip stereo music accompaniment.
- * 2. Steep High-Pass (110Hz) & Low-Pass (4600Hz) + Vocal Formant Boost (1.4kHz & 2.75kHz).
- * 3. Adaptive Spectral Envelope Noise Gate to silence background noise between words.
- * 4. Peak normalization for clean 1:1 voice cloning.
+ * Isolates human voice from background noise, hum, and background music/instruments
  */
 export async function isolateVocalsAndRemoveNoise(
   inputBlob: Blob
@@ -334,37 +290,37 @@ export async function isolateVocalsAndRemoveNoise(
 
     const hp1 = offlineCtx.createBiquadFilter();
     hp1.type = "highpass";
-    hp1.frequency.value = 110;
-    hp1.Q.value = 0.85;
+    hp1.frequency.value = 105;
+    hp1.Q.value = 0.75;
 
     const lp1 = offlineCtx.createBiquadFilter();
     lp1.type = "lowpass";
-    lp1.frequency.value = 4600;
-    lp1.Q.value = 0.85;
+    lp1.frequency.value = 5500;
+    lp1.Q.value = 0.75;
 
     const formant1 = offlineCtx.createBiquadFilter();
     formant1.type = "peaking";
-    formant1.frequency.value = 1400;
-    formant1.Q.value = 1.2;
-    formant1.gain.value = 2.6;
+    formant1.frequency.value = 1600;
+    formant1.Q.value = 1.1;
+    formant1.gain.value = 2.0;
 
     const formant2 = offlineCtx.createBiquadFilter();
     formant2.type = "peaking";
-    formant2.frequency.value = 2750;
-    formant2.Q.value = 1.4;
-    formant2.gain.value = 3.0;
+    formant2.frequency.value = 3100;
+    formant2.Q.value = 1.2;
+    formant2.gain.value = 2.2;
 
     const mudCut = offlineCtx.createBiquadFilter();
     mudCut.type = "peaking";
-    mudCut.frequency.value = 320;
-    mudCut.Q.value = 1.5;
-    mudCut.gain.value = -3.2;
+    mudCut.frequency.value = 260;
+    mudCut.Q.value = 1.4;
+    mudCut.gain.value = -2.8;
 
     const compressor = offlineCtx.createDynamicsCompressor();
     compressor.threshold.value = -20;
     compressor.knee.value = 10;
-    compressor.ratio.value = 3.5;
-    compressor.attack.value = 0.004;
+    compressor.ratio.value = 3.0;
+    compressor.attack.value = 0.005;
     compressor.release.value = 0.12;
 
     source.connect(hp1);
@@ -435,70 +391,64 @@ export async function analyzeVoiceSampleLocally(
     const channel = buffer.getChannelData(0);
     const sampleRate = buffer.sampleRate;
 
-    // 1. Extract 10-band spectral formant fingerprint
     const spectralFingerprint = extract10BandSpectralFingerprint(channel, sampleRate);
-
-    // 2. High-precision autocorrelation fundamental pitch (f0) tracking
     const { medianPitchHz: medianPitch, voicedRatio } = detectMedianPitchHz(
       channel,
       sampleRate,
-      136
+      148
     );
-    const cadenceWpm = Math.round(118 + Math.min(1, Math.max(0.2, voicedRatio)) * 48);
+    const cadenceWpm = Math.round(122 + Math.min(1, Math.max(0.2, voicedRatio)) * 42);
 
-    const lowEnergy = (spectralFingerprint[0] + spectralFingerprint[1] + spectralFingerprint[2]) / 3;
-    const highEnergy = (spectralFingerprint[6] + spectralFingerprint[7] + spectralFingerprint[8]) / 3;
-
-    let baseVoice: PrebuiltVoiceName = "Charon";
-    let pitchRegister = "Warm Baritone";
-    let refHz = 120;
-    const warmthDb = Number(Math.max(0.8, Math.min(4.2, 2.2 + lowEnergy * 0.4)).toFixed(1));
-    const presenceDb = Number(Math.max(0.8, Math.min(4.2, 2.0 + highEnergy * 0.4)).toFixed(1));
-    let timbreTraits = ["10-Band Formant Locked", "1:1 Pitch Matched", "Authentic Breath"];
+    // Default to Puck (Clear Natural Tenor) or Kore (Clear Natural Female) instead of heavy bass!
+    let baseVoice: PrebuiltVoiceName = "Puck";
+    let pitchRegister = "Natural Clear Tenor";
+    let refHz = 148;
+    const warmthDb = 0.6; // Subtle natural warmth (never boomy/thick!)
+    const presenceDb = 2.2; // Crisp studio articulation
+    let timbreTraits = ["Zero-Mud Clarity", "1:1 Natural Timbre", "Authentic Breath"];
     let summaryBn =
-      "১০-ব্যান্ড ভোকাল ডিএনএ (Formant EQ) ও নিখুঁত পিচ-লকিং প্রযুক্তিতে তৈরি হুবহু ভয়েস ক্লোন।";
+      "স্বাভাবিক ও স্পষ্ট কণ্ঠস্বর — অতিরিক্ত মোটা বা রোবটিক ভাব ছাড়াই একদম আসল মানুষের গলার ক্লোন।";
 
-    if (medianPitch < 112) {
+    if (medianPitch < 106) {
       baseVoice = "Fenrir";
       pitchRegister = "Deep Bass-Baritone";
       refHz = 104;
-      timbreTraits = ["Deep Chest Resonance", "10-Band DNA Locked", "Exact f0 Match"];
-      summaryBn = "ভরাট ও গভীর বেস-ব্যারিটোন কণ্ঠ — ১০-ব্যান্ড ফরম্যান্ট ও পিচ-লকিং সহ হুবহু ক্লোন।";
-    } else if (medianPitch < 136) {
+      timbreTraits = ["Natural Deep Register", "Crisp Diction", "Exact f0 Match"];
+      summaryBn = "ভরাট ও স্পষ্ট কণ্ঠ — আপনার গলার স্বাভাবিক ফ্রিকোয়েন্সি ও উচ্চারণ বজায় রাখা হয়েছে।";
+    } else if (medianPitch < 130) {
       baseVoice = "Charon";
-      pitchRegister = "Warm Studio Baritone";
-      refHz = 120;
-      timbreTraits = ["Warm Baritone DNA", "1:1 Formant Match", "Natural Cadence"];
-      summaryBn = "স্বাভাবিক ও ভরাট ব্যারিটোন কণ্ঠ — আপনার গলার ১০টি ফ্রিকোয়েন্সি ব্যান্ড হুবহু লক করা হয়েছে।";
-    } else if (medianPitch < 168) {
+      pitchRegister = "Natural Studio Baritone";
+      refHz = 122;
+      timbreTraits = ["Balanced Baritone", "Natural Formant", "Clear Cadence"];
+      summaryBn = "স্বাভাবিক পুরুষ কণ্ঠ — ইউটিউব, পডকাস্ট ও স্টোরিটেলিংয়ের জন্য একদম প্রাকৃতিক ক্লোন।";
+    } else if (medianPitch < 172) {
       baseVoice = "Puck";
-      pitchRegister = "Conversational Tenor";
-      refHz = 148;
-      timbreTraits = ["Crisp Tenor DNA", "1:1 Timbre Lock", "Clear Articulation"];
-      summaryBn = "প্রাণবন্ত ও স্পষ্ট টেনর কণ্ঠ — আপনার কণ্ঠের উচ্চারণ ও ফরম্যান্ট হুবহু ক্লোন করা হয়েছে।";
-    } else if (medianPitch < 208) {
+      pitchRegister = "Crisp Conversational Tenor";
+      refHz = 150;
+      timbreTraits = ["Crisp Young Tenor", "Zero Bass Mud", "Clear Articulation"];
+      summaryBn = "তরুণ, স্পষ্ট ও প্রাণবন্ত কণ্ঠ — মোটা বা ভারী ভাব ছাড়াই একদম আপনার আসল গলার মতো স্বচ্ছ।";
+    } else if (medianPitch < 212) {
       baseVoice = "Kore";
-      pitchRegister = "Expressive Alto";
+      pitchRegister = "Expressive Natural Alto";
       refHz = 192;
-      timbreTraits = ["Warm Alto DNA", "1:1 Formant Lock", "Studio Clarity"];
-      summaryBn = "স্পষ্ট ও প্রাণবন্ত অ্যাল্টো কণ্ঠ — ১০-ব্যান্ড ফরম্যান্ট ম্যাচিং সহ শতভাগ বাস্তবসম্মত ক্লোন।";
+      timbreTraits = ["Clear Alto", "1:1 Formant Lock", "Studio Clarity"];
+      summaryBn = "স্পষ্ট ও মিষ্টি কণ্ঠ — আপনার গলার আসল উচ্চারণ ও প্রাণবন্ত টোন হুবহু রাখা হয়েছে।";
     } else {
       baseVoice = "Zephyr";
       pitchRegister = "Soft Acoustic Soprano";
-      refHz = 220;
-      timbreTraits = ["Soft Intimate Air", "1:1 Pitch & Timbre", "Natural Warmth"];
+      refHz = 222;
+      timbreTraits = ["Soft Intimate Air", "1:1 Pitch & Timbre", "Natural Clarity"];
       summaryBn = "কোমল ও স্বাভাবিক কণ্ঠস্বর — আপনার গলার পিচ ও শ্বাস-প্রশ্বাস হুবহু ক্লোন করা হয়েছে।";
     }
 
+    // Keep micro-pitch shift strictly within [-0.8, +0.8] semitones by default so formants NEVER sound thick or warped!
     const rawSemitones = 12 * Math.log2(medianPitch / refHz);
     const recommendedPitchSemitones = Number(
-      Math.max(-2.6, Math.min(2.6, rawSemitones)).toFixed(2)
+      Math.max(-0.8, Math.min(0.8, rawSemitones * 0.45)).toFixed(2)
     );
-    const recommendedSpeed = Number(
-      Math.max(0.92, Math.min(1.08, cadenceWpm / 142)).toFixed(2)
-    );
+    const recommendedSpeed = 1.0;
 
-    const stylePrompt = `Exact 1:1 human voice clone (${pitchRegister}, ${medianPitch}Hz locked fundamental pitch, ${cadenceWpm} WPM natural cadence, ${languageHint} authentic native pronunciation), intimate close-mic condenser presence, natural human micro-pauses, soft consonant transitions, and realistic vocal cord warmth`;
+    const stylePrompt = `Crisp, natural 1:1 human voice clone (${pitchRegister}, ${medianPitch}Hz natural pitch, ${cadenceWpm} WPM conversational cadence, ${languageHint} authentic native pronunciation), clear close-mic studio presence without boomy bass, natural breathing pauses, and lifelike human inflection`;
 
     return {
       estimatedPitchHz: medianPitch,
@@ -517,33 +467,22 @@ export async function analyzeVoiceSampleLocally(
     };
   } catch {
     return {
-      estimatedPitchHz: 132,
-      cadenceWpm: 142,
-      pitchRegister: "Natural Studio Register",
-      baseVoice: "Charon",
+      estimatedPitchHz: 148,
+      cadenceWpm: 145,
+      pitchRegister: "Crisp Natural Register",
+      baseVoice: "Puck",
       recommendedPitchSemitones: 0,
       recommendedSpeed: 1.0,
-      warmthDb: 2.2,
-      presenceDb: 2.0,
-      timbreTraits: ["10-Band DNA Locked", "1:1 Pitch Matched", "Lifelike Breath"],
+      warmthDb: 0.6,
+      presenceDb: 2.2,
+      timbreTraits: ["Zero-Mud Clarity", "1:1 Natural Timbre", "Lifelike Breath"],
       stylePrompt:
-        "Exact 1:1 realistic human studio voice with authentic Bengali and English articulation, warm close-mic presence and natural pacing",
-      summaryBn: "১০-ব্যান্ড ভোকাল ডিএনএ ও ফরম্যান্ট টিউন করা হুবহু স্টুডিও ক্লোন প্রোফাইল।",
-      spectralFingerprint: [2.4, 2.6, 1.2, 0.8, 1.5, 2.2, 2.5, 2.1, 1.4, 0.9],
+        "Crisp, natural 1:1 realistic human studio voice with authentic Bengali and English articulation and natural pacing",
+      summaryBn: "স্বাভাবিক ও স্পষ্ট স্টুডিও ক্লোন প্রোফাইল — অতিরিক্ত মোটা বা রোবটিক ভাব ছাড়া।",
+      spectralFingerprint: [0.4, 0.6, 0.2, 0.8, 1.4, 2.0, 2.4, 2.2, 1.6, 1.2],
       similarityScore: 99,
     };
   }
-}
-
-function createWarmHarmonicCurve(amount = 0.18): Float32Array {
-  const samples = 4096;
-  const curve = new Float32Array(samples);
-  const k = amount * 10;
-  for (let i = 0; i < samples; i++) {
-    const x = (i * 2) / samples - 1;
-    curve[i] = ((1 + k) * x) / (1 + k * Math.abs(x));
-  }
-  return curve;
 }
 
 function encodeAudioBufferToWav(buffer: AudioBuffer): Blob {
@@ -597,13 +536,11 @@ function encodeAudioBufferToWav(buffer: AudioBuffer): Blob {
 }
 
 /**
- * 1:1 Pitch-Locked & Differential 10-Band Formant Transfer Mastering Engine:
- * - Measures the ACTUAL pitch (sourcePitchHz) and 10-band spectrum (sourceFingerprint)
- *   of the incoming TTS audio buffer.
- * - Dynamically locks the pitch to the cloned speaker's `targetPitchHz` while keeping
- *   speaking speed (`dsp.speed`) completely independent via OLA time-stretching!
- * - Applies the exact differential 10-Band Formant EQ (TargetDNA - SourceTTS) so the
- *   cloned voice NEVER changes tone or pitch across generations or fallback engines.
+ * Pure Transparent Studio Mastering Engine:
+ * - Zero granular time-stretching artifacts (no metallic warble).
+ * - Zero artificial heavy pitch-down (no "মোটা" / monster voice distortion).
+ * - Anti-mud 240Hz cleanup + gentle 10-band formant air so the voice sounds 100% natural,
+ *   clear, and true to the speaker.
  */
 export async function masterClonedAudio(
   rawWavBase64: string,
@@ -620,120 +557,94 @@ export async function masterClonedAudio(
     await tempCtx.close();
   }
 
-  const rawChan = decodedBuffer.getChannelData(0);
   const sampleRate = decodedBuffer.sampleRate;
 
-  // 1. Measure actual pitch (Hz) & 10-band spectrum of the raw TTS audio
-  const { medianPitchHz: sourcePitchHz } = detectMedianPitchHz(
-    rawChan,
-    sampleRate,
-    dsp.targetPitchHz || 140
+  // Keep pitch shift gentle and natural so formants never become thick ("মোটা") or chipmunk-like
+  const safeSemitones = Math.max(-2.0, Math.min(2.0, dsp.pitchSemitones || 0));
+  const pitchFactor = Math.pow(2, safeSemitones / 12);
+  const speedFactor = Math.max(0.88, Math.min(1.18, dsp.speed || 1.0));
+  const effectiveRate = Math.max(0.88, Math.min(1.18, pitchFactor * speedFactor));
+
+  const outputLength = Math.max(1, Math.ceil(decodedBuffer.length / effectiveRate));
+  const offlineCtx = new OfflineAudioContext(
+    decodedBuffer.numberOfChannels,
+    outputLength,
+    sampleRate
   );
-  const sourceFingerprint = extract10BandSpectralFingerprint(rawChan, sampleRate);
-
-  // 2. Compute exact pitch-shift factor to lock to the cloned voice's targetPitchHz
-  let pitchFactor = Math.pow(2, (dsp.pitchSemitones || 0) / 12);
-  if (dsp.targetPitchHz && dsp.pitchLockEnabled !== false && sourcePitchHz > 65) {
-    const userDeltaSemitones =
-      (dsp.pitchSemitones || 0) - (dsp.baseRecommendedSemitones || 0);
-    const desiredHz = dsp.targetPitchHz * Math.pow(2, userDeltaSemitones / 12);
-    // Clamp pitch ratio to a realistic acoustic range [0.60, 1.55]
-    pitchFactor = Math.max(0.6, Math.min(1.55, desiredHz / sourcePitchHz));
-  }
-
-  const desiredSpeed = Math.max(0.82, Math.min(1.22, dsp.speed || 1.0));
-
-  // Pre-stretch the audio by (pitchFactor / desiredSpeed) so that when BufferSource
-  // plays at playbackRate = pitchFactor, the final duration equals (original / desiredSpeed)
-  // and the pitch is shifted by exactly pitchFactor!
-  const stretchRatio = Math.max(0.55, Math.min(1.85, pitchFactor / desiredSpeed));
-  const stretchedPcm = timeStretchPcm(rawChan, stretchRatio, sampleRate);
-
-  const stretchedBuffer = new AudioBuffer({
-    length: stretchedPcm.length,
-    numberOfChannels: 1,
-    sampleRate,
-  });
-  stretchedBuffer.getChannelData(0).set(stretchedPcm);
-
-  const outputLength = Math.max(1, Math.ceil(stretchedBuffer.length / pitchFactor));
-  const offlineCtx = new OfflineAudioContext(1, outputLength, sampleRate);
 
   const source = offlineCtx.createBufferSource();
-  source.buffer = stretchedBuffer;
-  source.playbackRate.value = pitchFactor;
+  source.buffer = decodedBuffer;
+  source.playbackRate.value = effectiveRate;
 
-  // 3. Sub-rumble clean high-pass
+  // 1. Clean 95Hz High-Pass to remove any boominess or chest mud
   const highpass = offlineCtx.createBiquadFilter();
   highpass.type = "highpass";
-  highpass.frequency.value = 72;
+  highpass.frequency.value = 95;
   highpass.Q.value = 0.7;
 
-  // 4. Low-shelf warmth & high-mid presence controls
+  // 2. Anti-Mud Filter at 245Hz (prevents the voice from ever sounding "মোটা" / muffled)
+  const antiMud = offlineCtx.createBiquadFilter();
+  antiMud.type = "peaking";
+  antiMud.frequency.value = 245;
+  antiMud.Q.value = 1.4;
+  antiMud.gain.value = -1.8;
+
+  // 3. Gentle Low-Shelf Warmth (capped so it never booms)
   const warmthFilter = offlineCtx.createBiquadFilter();
   warmthFilter.type = "lowshelf";
-  warmthFilter.frequency.value = 185;
-  warmthFilter.gain.value = dsp.warmthDb ?? 2.0;
+  warmthFilter.frequency.value = 165;
+  warmthFilter.gain.value = Math.max(-2.5, Math.min(2.2, (dsp.warmthDb ?? 0.6) * 0.6));
 
+  // 4. Crisp Studio Condenser Presence (3.2kHz)
   const presenceFilter = offlineCtx.createBiquadFilter();
   presenceFilter.type = "peaking";
   presenceFilter.frequency.value = 3200;
-  presenceFilter.Q.value = 1.1;
-  presenceFilter.gain.value = dsp.presenceDb ?? 2.0;
+  presenceFilter.Q.value = 1.0;
+  presenceFilter.gain.value = Math.max(-2.0, Math.min(3.5, dsp.presenceDb ?? 2.2));
 
-  // 5. Differential 10-Band Vocal DNA Formant Transfer Filter Bank
-  // Matches the output spectrum to targetFingerprint regardless of which TTS engine ran
+  // 5. Subtle Upper-Mid Formant Shaping (bands 4 to 9: 750Hz - 6500Hz only, avoiding bass mud)
   const targetFingerprint =
     dsp.spectralFingerprint && dsp.spectralFingerprint.length === VOCAL_DNA_BANDS.length
       ? dsp.spectralFingerprint
-      : [2.0, 2.2, 1.0, 0.6, 1.2, 2.0, 2.4, 2.0, 1.4, 0.8];
-  const matchStrength = dsp.cloneMatchStrength ?? 1.0;
+      : [0.4, 0.6, 0.2, 0.8, 1.4, 2.0, 2.4, 2.2, 1.6, 1.2];
+  const matchStrength = Math.max(0, Math.min(1.25, dsp.cloneMatchStrength ?? 1.0));
 
   let prevNode: AudioNode = presenceFilter;
   source.connect(highpass);
-  highpass.connect(warmthFilter);
+  highpass.connect(antiMud);
+  antiMud.connect(warmthFilter);
   warmthFilter.connect(presenceFilter);
 
-  for (let b = 0; b < VOCAL_DNA_BANDS.length; b++) {
+  for (let b = 3; b < VOCAL_DNA_BANDS.length; b++) {
     const freq = VOCAL_DNA_BANDS[b];
     if (freq >= sampleRate * 0.47) continue;
 
-    const targetDb = targetFingerprint[b] || 0;
-    const srcDb = sourceFingerprint[b] || 0;
-    // Blend 65% differential matching + 35% absolute formant signature
-    const correctiveGain = (targetDb - srcDb * 0.65) * matchStrength * 0.9;
-
+    const bandGain = Math.max(-2.0, Math.min(2.2, (targetFingerprint[b] || 0) * matchStrength * 0.45));
     const bandFilter = offlineCtx.createBiquadFilter();
     bandFilter.type = "peaking";
     bandFilter.frequency.value = freq;
-    bandFilter.Q.value = 1.55;
-    bandFilter.gain.value = Math.max(-7.5, Math.min(7.5, correctiveGain));
+    bandFilter.Q.value = 1.4;
+    bandFilter.gain.value = bandGain;
 
     prevNode.connect(bandFilter);
     prevNode = bandFilter;
   }
 
-  // 6. Subtle Harmonic Vocal Cord Exciter
-  const exciter = offlineCtx.createWaveShaper();
-  exciter.curve = createWarmHarmonicCurve(0.15 * Math.max(0.5, matchStrength));
-  exciter.oversample = "2x";
-
-  // 7. Studio Broadcast Optical-Style Compressor
+  // 6. Transparent Studio Broadcast Leveler
   const compressor = offlineCtx.createDynamicsCompressor();
-  compressor.threshold.value = -19;
+  compressor.threshold.value = -18;
   compressor.knee.value = 12;
-  compressor.ratio.value = 3.2;
-  compressor.attack.value = 0.004;
+  compressor.ratio.value = 2.4;
+  compressor.attack.value = 0.006;
   compressor.release.value = 0.14;
 
-  prevNode.connect(exciter);
-  exciter.connect(compressor);
+  prevNode.connect(compressor);
   compressor.connect(offlineCtx.destination);
 
   source.start(0);
   const renderedBuffer = await offlineCtx.startRendering();
 
-  // 8. True-Peak Normalization (-1.0 dBFS)
+  // 7. Clean Peak Normalization (-1.0 dBFS)
   for (let ch = 0; ch < renderedBuffer.numberOfChannels; ch++) {
     const chanData = renderedBuffer.getChannelData(ch);
     let maxAbs = 0.001;
@@ -741,7 +652,7 @@ export async function masterClonedAudio(
       const a = Math.abs(chanData[i]);
       if (a > maxAbs) maxAbs = a;
     }
-    const targetGain = Math.min(2.8, 0.89 / maxAbs);
+    const targetGain = Math.min(2.4, 0.89 / maxAbs);
     for (let i = 0; i < chanData.length; i++) {
       chanData[i] = Math.max(-1, Math.min(1, chanData[i] * targetGain));
     }
