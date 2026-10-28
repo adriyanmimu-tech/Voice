@@ -46,11 +46,18 @@ import {
   analyzeVoiceSampleLocally,
   blobToBase64,
   masterClonedAudio,
+  stitchMasteredDialogueBlobs,
 } from "./utils/audioDsp";
 import { WaveformPlayer } from "./components/WaveformPlayer";
 import { VoiceRecorderCard } from "./components/VoiceRecorderCard";
 import { usePWAInstall } from "./hooks/usePWAInstall";
 import { callStudioApi, synthesizeClientSideNeuralTts } from "./utils/clientTtsFallback";
+import {
+  loadCustomVoicesFromDb,
+  saveCustomVoicesToDb,
+  loadHistoryFromDb,
+  saveHistoryToDb,
+} from "./utils/studioStorage";
 
 type StudioTab = "tts" | "voices" | "clone-lab" | "dialogue" | "dubbing" | "library";
 
@@ -102,6 +109,8 @@ const FEATURE_DOCK_ITEMS: {
 
 const VOCAL_EXPRESSION_TAGS = [
   { tag: "<breath>", label: "শ্বাস (<breath>)", icon: Wind },
+  { tag: " — ", label: "ছোট বিরতি (0.4s)", icon: AudioWaveform },
+  { tag: " ... <breath> ", label: "দীর্ঘ বিরতি (0.8s)", icon: Sliders },
   { tag: "<laugh>", label: "হাসি (<laugh>)", icon: Smile },
   { tag: "<gasp>", label: "অবাক (<gasp>)", icon: Flame },
   { tag: "|mhm|", label: "সহমত (|mhm|)", icon: MessageSquare },
@@ -279,7 +288,28 @@ export default function App() {
     } catch {
       // ignore quota errors
     }
+    saveCustomVoicesToDb(customVoices);
   }, [customVoices]);
+
+  useEffect(() => {
+    loadCustomVoicesFromDb().then((dbVoices) => {
+      if (dbVoices.length > 0) {
+        setCustomVoices((prev) => {
+          const existingIds = new Set(prev.map((v) => v.id));
+          const merged = [...prev];
+          for (const dv of dbVoices) {
+            if (!existingIds.has(dv.id)) merged.push(dv);
+          }
+          return merged;
+        });
+      }
+    });
+    loadHistoryFromDb().then((savedHistory) => {
+      if (savedHistory.length > 0) {
+        setHistoryItems((prev) => (prev.length === 0 ? savedHistory : prev));
+      }
+    });
+  }, []);
 
   useEffect(() => {
     try {
@@ -314,6 +344,7 @@ export default function App() {
     warmthDb: activeVoice?.warmthDb ?? 2.0,
     presenceDb: activeVoice?.presenceDb ?? 1.8,
     spectralFingerprint: activeVoice?.spectralFingerprint,
+    formantsHz: activeVoice?.formantsHz,
     cloneMatchStrength: 1.0,
   });
 
@@ -328,6 +359,7 @@ export default function App() {
         warmthDb: activeVoice.warmthDb,
         presenceDb: activeVoice.presenceDb,
         spectralFingerprint: activeVoice.spectralFingerprint,
+        formantsHz: activeVoice.formantsHz,
         cloneMatchStrength: 1.0,
       });
     }
@@ -338,6 +370,12 @@ export default function App() {
   const [synthError, setSynthError] = useState<string | null>(null);
   const [latestOutput, setLatestOutput] = useState<GeneratedAudioItem | null>(null);
   const [historyItems, setHistoryItems] = useState<GeneratedAudioItem[]>([]);
+
+  useEffect(() => {
+    if (historyItems.length > 0) {
+      saveHistoryToDb(historyItems);
+    }
+  }, [historyItems]);
 
   const [scriptTopic, setScriptTopic] = useState("");
   const [scriptLanguage, setScriptLanguage] = useState("Bengali (বাংলা)");
@@ -511,6 +549,7 @@ export default function App() {
       warmthDb: voice.warmthDb,
       presenceDb: voice.presenceDb,
       spectralFingerprint: voice.spectralFingerprint,
+      formantsHz: voice.formantsHz,
       cloneMatchStrength: 1.0,
     };
     setDspParams(voiceDsp);
@@ -549,7 +588,7 @@ export default function App() {
     const cleanName =
       cloneNameInput.trim() || `আমার ক্লোন কণ্ঠ #${customVoices.length + 1}`;
 
-    // Step 1: Run real-time Web Audio API pitch (Hz) & cadence (WPM) analysis in browser
+    // Step 1: Run real-time Web Audio API pitch (Hz), Formants (F1/F2/F3) & cadence (WPM) analysis in browser
     const localAcoustics = await analyzeVoiceSampleLocally(sampleBlob, cloneLanguageHint);
 
     try {
@@ -587,9 +626,9 @@ export default function App() {
           : p.pitchRegister || localAcoustics.pitchRegister;
 
       const clampedSemitones = Math.max(
-        -0.8,
+        -1.2,
         Math.min(
-          0.8,
+          1.2,
           typeof p.recommendedPitchSemitones === "number"
             ? p.recommendedPitchSemitones
             : localAcoustics.recommendedPitchSemitones
@@ -620,6 +659,7 @@ export default function App() {
         spectralFingerprint: Array.isArray(p.spectralFingerprint)
           ? p.spectralFingerprint
           : localAcoustics.spectralFingerprint,
+        formantsHz: p.formantsHz || localAcoustics.formantsHz,
         similarityScore: p.similarityScore || localAcoustics.similarityScore || 99,
         sampleTranscript:
           p.transcript || "স্বাগতম, এটি আমার ১০০% হুবহু রেকর্ড করা ভয়েস ক্লোন প্রোফাইল।",
@@ -656,13 +696,14 @@ export default function App() {
         summaryBn: localAcoustics.summaryBn,
         timbreTraits: localAcoustics.timbreTraits,
         recommendedPitchSemitones: Math.max(
-          -0.8,
-          Math.min(0.8, localAcoustics.recommendedPitchSemitones)
+          -1.2,
+          Math.min(1.2, localAcoustics.recommendedPitchSemitones)
         ),
         recommendedSpeed: localAcoustics.recommendedSpeed,
         warmthDb: Math.min(1.0, localAcoustics.warmthDb || 0.5),
         presenceDb: Math.max(2.1, localAcoustics.presenceDb || 2.3),
         spectralFingerprint: localAcoustics.spectralFingerprint,
+        formantsHz: localAcoustics.formantsHz,
         similarityScore: localAcoustics.similarityScore || 99,
         sampleTranscript: "স্বাগতম, এটি আমার ১০০% হুবহু রেকর্ড করা ভয়েস ক্লোন প্রোফাইল।",
         sampleAudioUrl: sampleUrl || undefined,
@@ -728,6 +769,7 @@ export default function App() {
       const voiceB = voices.find((v) => v.id === speakerBVoiceId) || voices[1] || voices[0];
 
       let audioBase64 = "";
+      let turnAudios: { speaker: "A" | "B"; audioBase64: string; mimeType: string }[] = [];
       try {
         const data = await callStudioApi("/api/voice/dialogue", {
           turns: dialogueTurns,
@@ -743,8 +785,50 @@ export default function App() {
           },
         });
         if (data?.audioBase64) audioBase64 = data.audioBase64;
+        if (Array.isArray(data?.turnAudios)) turnAudios = data.turnAudios;
       } catch {
         // Standalone APK fallback
+      }
+
+      // Master each speaker turn independently with its own Speaker A or Speaker B Vocal DNA & Formant Lock!
+      if (turnAudios.length > 0) {
+        const masteredBlobs: Blob[] = [];
+        for (const tAudio of turnAudios) {
+          const spkVoice = tAudio.speaker === "A" ? voiceA : voiceB;
+          const m = await masterClonedAudio(tAudio.audioBase64, {
+            pitchSemitones: spkVoice.recommendedPitchSemitones,
+            baseRecommendedSemitones: spkVoice.recommendedPitchSemitones,
+            targetPitchHz: spkVoice.estimatedPitchHz,
+            pitchLockEnabled: true,
+            speed: spkVoice.recommendedSpeed || 1.0,
+            warmthDb: spkVoice.warmthDb,
+            presenceDb: spkVoice.presenceDb,
+            spectralFingerprint: spkVoice.spectralFingerprint,
+            formantsHz: spkVoice.formantsHz,
+            cloneMatchStrength: 1.0,
+          });
+          masteredBlobs.push(m.blob);
+        }
+
+        const stitched = await stitchMasteredDialogueBlobs(masteredBlobs, 180);
+        const item: GeneratedAudioItem = {
+          id: `dlg-${Date.now()}`,
+          voiceId: `${voiceA.id}+${voiceB.id}`,
+          voiceName: `${voiceA.name.split(" ")[0]} ও ${voiceB.name.split(" ")[0]}`,
+          mode: "dialogue",
+          scriptText: dialogueTurns.map((t) => t.text).join(" — "),
+          audioUrl: stitched.url,
+          rawWavBase64: stitched.wavBase64,
+          durationSec: stitched.durationSec,
+          peaks: stitched.peaks,
+          createdAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+          pitchSemitones: 0,
+          speed: 1.0,
+        };
+
+        setDialogueOutput(item);
+        setHistoryItems((prev) => [item, ...prev]);
+        return;
       }
 
       if (!audioBase64) {
@@ -765,6 +849,7 @@ export default function App() {
         warmthDb: voiceA.warmthDb,
         presenceDb: voiceA.presenceDb,
         spectralFingerprint: voiceA.spectralFingerprint,
+        formantsHz: voiceA.formantsHz,
         cloneMatchStrength: 1.0,
       });
 

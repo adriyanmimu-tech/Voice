@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Play, Pause, Download, RotateCcw, Volume2 } from "lucide-react";
+import { Play, Pause, Download, RotateCcw, Volume2, Subtitles, Share2 } from "lucide-react";
+import { generateSrtSubtitles } from "../utils/studioStorage";
 
 interface WaveformPlayerProps {
   audioUrl: string;
@@ -57,6 +58,45 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
     const targetTime = (index / totalBars) * totalDuration;
     audio.currentTime = targetTime;
     setCurrentTime(targetTime);
+  };
+
+  const handleDownloadSrt = () => {
+    if (!sublabel) return;
+    const srtContent = generateSrtSubtitles(sublabel, totalDuration || durationSec || 5);
+    if (!srtContent) return;
+    const blob = new Blob([srtContent], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = downloadFilename.replace(/\.(wav|mp3)$/i, "") + ".srt";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleShareAudio = async () => {
+    try {
+      const res = await fetch(audioUrl);
+      const blob = await res.blob();
+      const file = new File([blob], downloadFilename, { type: blob.type || "audio/wav" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          title: label || "KanthoClone Studio Audio",
+          text: sublabel || "KanthoClone Studio দিয়ে তৈরি ভয়েসওভার",
+          files: [file],
+        });
+        return;
+      }
+    } catch {
+      // Fallback to direct download if Web Share API is not supported
+    }
+    const a = document.createElement("a");
+    a.href = audioUrl;
+    a.download = downloadFilename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   };
 
   const formatTime = (sec: number) => {
@@ -117,7 +157,7 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
         </div>
       )}
 
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-2.5">
         <button
           type="button"
           onClick={togglePlay}
@@ -133,7 +173,7 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
 
         {/* Interactive Studio Bar Waveform */}
         <div
-          className={`flex-1 flex items-center gap-[3px] ${
+          className={`flex-1 min-w-[140px] flex items-center gap-[3px] ${
             compact ? "h-10" : "h-12"
           } px-3 bg-[#0B1120] border border-slate-800/80 rounded-lg overflow-hidden select-none`}
         >
@@ -170,23 +210,46 @@ export const WaveformPlayer: React.FC<WaveformPlayerProps> = ({
           </div>
         )}
 
-        <button
-          type="button"
-          onClick={handleRestart}
-          title="শুরু থেকে বাজান (Restart)"
-          className="p-2.5 text-slate-400 hover:text-slate-100 bg-slate-800/70 hover:bg-slate-800 border border-slate-700/70 rounded-lg transition-colors shrink-0 cursor-pointer"
-        >
-          <RotateCcw className="w-4 h-4" />
-        </button>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={handleRestart}
+            title="শুরু থেকে বাজান (Restart)"
+            className="p-2.5 text-slate-400 hover:text-slate-100 bg-slate-800/70 hover:bg-slate-800 border border-slate-700/70 rounded-lg transition-colors shrink-0 cursor-pointer"
+          >
+            <RotateCcw className="w-4 h-4" />
+          </button>
 
-        <a
-          href={audioUrl}
-          download={downloadFilename}
-          className="px-3.5 py-2.5 text-xs font-semibold text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
-        >
-          <Download className="w-3.5 h-3.5 text-amber-400" />
-          <span>WAV ডাউনলোড</span>
-        </a>
+          {sublabel && !compact && (
+            <button
+              type="button"
+              onClick={handleDownloadSrt}
+              title="CapCut / YouTube এর জন্য .SRT সাবটাইটেল ডাউনলোড"
+              className="px-2.5 py-2.5 text-xs font-medium text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-lg flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Subtitles className="w-3.5 h-3.5" />
+              <span>.SRT ক্যাপশন</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={handleShareAudio}
+            title="শেয়ার করুন"
+            className="p-2.5 text-slate-300 hover:text-amber-300 bg-slate-800/70 hover:bg-slate-800 border border-slate-700/70 rounded-lg transition-colors shrink-0 cursor-pointer"
+          >
+            <Share2 className="w-4 h-4" />
+          </button>
+
+          <a
+            href={audioUrl}
+            download={downloadFilename}
+            className="px-3 py-2.5 text-xs font-semibold text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+          >
+            <Download className="w-3.5 h-3.5 text-amber-400" />
+            <span>WAV</span>
+          </a>
+        </div>
       </div>
     </div>
   );

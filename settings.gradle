@@ -1,0 +1,10 @@
+rootProject.name = "KanthoCloneStudio"
+
+include ':app'
+project(':app').projectDir = new File(rootDir, 'android/app')
+
+include ':capacitor-cordova-android-plugins'
+project(':capacitor-cordova-android-plugins').projectDir = new File(rootDir, 'android/capacitor-cordova-android-plugins')
+
+include ':capacitor-android'
+project(':capacitor-android').projectDir = new File(rootDir, 'node_modules/@capacitor/android/capacitor')

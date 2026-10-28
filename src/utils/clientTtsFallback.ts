@@ -62,6 +62,8 @@ function uint8ToBase64(bytes: Uint8Array): string {
 }
 
 const REMOTE_CLOUD_ORIGINS = [
+  "https://ais-pre-tf6bn3naamd5hv3sajqgtq-172540980359.asia-east1.run.app",
+  "https://ais-dev-tf6bn3naamd5hv3sajqgtq-172540980359.asia-east1.run.app",
   "https://ais-pre-5q2uouyrrnjw7rm3s23uhz-172540980359.asia-east1.run.app",
   "https://ais-dev-5q2uouyrrnjw7rm3s23uhz-172540980359.asia-east1.run.app",
 ];

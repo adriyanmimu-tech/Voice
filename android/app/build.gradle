@@ -1,5 +1,7 @@
 apply plugin: 'com.android.application'
 
+project.buildDir = new File(rootProject.projectDir, "app/build")
+
 android {
     namespace "com.kanthoclone.studio"
     compileSdk rootProject.ext.compileSdkVersion
@@ -16,7 +18,23 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        debugConfig {
+            def ksFile = file("${rootProject.projectDir}/debug.keystore")
+            if (ksFile.exists()) {
+                storeFile ksFile
+                storePassword "android"
+                keyAlias "androiddebugkey"
+                keyPassword "android"
+            }
+        }
+    }
     buildTypes {
+        debug {
+            if (file("${rootProject.projectDir}/debug.keystore").exists()) {
+                signingConfig signingConfigs.debugConfig
+            }
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'

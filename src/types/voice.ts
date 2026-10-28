@@ -28,6 +28,8 @@ export interface ClonedVoiceProfile {
   presenceDb: number;
   /** 10-band spectral energy profile (110Hz to 6500Hz) for 1:1 Formant & Timbre Transfer */
   spectralFingerprint?: number[];
+  /** Vocal Tract Formant Resonances (F1, F2, F3 in Hz) */
+  formantsHz?: { f1: number; f2: number; f3: number };
   /** Similarity match score (e.g. 98%) */
   similarityScore?: number;
   sampleTranscript?: string;

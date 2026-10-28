@@ -540,12 +540,12 @@ Examine and replicate 1:1:
         const rawText = response.text?.trim() || "{}";
         const parsed = JSON.parse(rawText);
         parsed.baseVoice = normalizeVoiceName(parsed.baseVoice || localAcoustics?.baseVoice);
-        // Clamp pitch semitones to [-0.8, +0.8] so the cloned voice NEVER sounds artificially thick ("মোটা")
+        // Clamp pitch semitones to [-1.2, +1.2] so the cloned voice NEVER sounds artificially thick ("মোটা")
         parsed.recommendedPitchSemitones = Number(
           Math.max(
-            -0.8,
+            -1.2,
             Math.min(
-              0.8,
+              1.2,
               typeof localAcoustics?.recommendedPitchSemitones === "number"
                 ? localAcoustics.recommendedPitchSemitones
                 : parsed.recommendedPitchSemitones || 0
@@ -558,6 +558,7 @@ Examine and replicate 1:1:
           parsed.estimatedPitchHz = localAcoustics.estimatedPitchHz;
         }
         parsed.spectralFingerprint = localAcoustics?.spectralFingerprint;
+        parsed.formantsHz = localAcoustics?.formantsHz;
         parsed.similarityScore = 99;
         return res.json({ profile: parsed });
       } catch {
@@ -586,6 +587,7 @@ Examine and replicate 1:1:
           spectralFingerprint: localAcoustics?.spectralFingerprint || [
             0.4, 0.6, 0.2, 0.8, 1.4, 2.0, 2.4, 2.2, 1.6, 1.2,
           ],
+          formantsHz: localAcoustics?.formantsHz || { f1: 510, f2: 1620, f3: 2880 },
           similarityScore: 99,
         };
 
@@ -652,7 +654,7 @@ Examine and replicate 1:1:
     }
   });
 
-  // 3. Dual-Speaker Realistic Dialogue / Podcast Synthesis
+  // 3. Dual-Speaker Realistic Dialogue / Podcast Synthesis (returns individual turn audio + combined fallback)
   app.post("/api/voice/dialogue", async (req, res) => {
     try {
       const { turns, speakerA, speakerB } = req.body;
@@ -669,17 +671,24 @@ Examine and replicate 1:1:
       // Synthesize each speaker turn with its own distinct Neural Voice (Speaker A vs Speaker B)
       try {
         const turnBuffers: Buffer[] = [];
+        const turnAudios: { speaker: "A" | "B"; audioBase64: string; mimeType: string }[] = [];
         for (const t of validTurns) {
           const isA = t.speaker === "A";
           const vName = normalizeVoiceName(isA ? speakerA?.baseVoice : speakerB?.baseVoice);
           const sPrompt = isA ? speakerA?.stylePrompt || "" : speakerB?.stylePrompt || "";
           const turnAudio = await synthesizeWithEdgeNeuralTts(t.text.trim(), vName, sPrompt);
           turnBuffers.push(Buffer.from(turnAudio.audioBase64, "base64"));
+          turnAudios.push({
+            speaker: isA ? "A" : "B",
+            audioBase64: turnAudio.audioBase64,
+            mimeType: turnAudio.mimeType,
+          });
         }
         if (turnBuffers.length > 0) {
           return res.json({
             audioBase64: Buffer.concat(turnBuffers).toString("base64"),
             mimeType: "audio/mpeg",
+            turnAudios,
           });
         }
       } catch {
