@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">KanthoClone Studio</string>
+    <string name="title_activity_main">KanthoClone Studio</string>
+    <string name="package_name">com.kanthoclone.studio</string>
+    <string name="custom_url_scheme">com.kanthoclone.studio</string>
+</resources>

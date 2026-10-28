@@ -28,17 +28,13 @@ jobs:
           distribution: "temurin"
           java-version: "21"
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Dependencies & Build Web Bundle
         run: |
           npm install --legacy-peer-deps
           npm run build
 
-      - name: Initialize Capacitor Android Project
+      - name: Sync Capacitor Android Project
         run: |
-          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 --save --legacy-peer-deps
           if [ ! -d "android" ]; then
             npx cap add android
           fi
